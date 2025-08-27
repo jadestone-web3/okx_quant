@@ -1,0 +1,13 @@
+# Rust build
+/target
+**/*.rs.bk
+**/*.swp
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Cargo
+Cargo.lock
