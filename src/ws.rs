@@ -20,21 +20,19 @@ pub async fn start(manager: Arc<Mutex<StrategyManager>>) -> anyhow::Result<()> {
     let write = Arc::new(Mutex::new(write));
 
     // 订阅 SOL-USDT ticker & 1m candle
-    // let sub_msg = r#"{
-    //     "op":"subscribe",
-    //     "args":[
-    //         // {"channel":"tickers","instId":"SOL-USDT"},
-    //         // {"channel":"candle1m","instId":"SOL-USDT"}
-    //         {"channel":"candle1m"}
-    //     ]
-    // }"#;
-
     let sub_msg = r#"{
         "op":"subscribe",
         "args":[
-           {"channel":"candle5m","instId":"SOL-USDT"}
+            {"channel":"tickers","instId":"SOL-USDT"}
         ]
     }"#;
+
+    // let sub_msg = r#"{
+    //     "op":"subscribe",
+    //     "args":[
+    //        {"channel":"candle5m","instId":"SOL-USDT"}
+    //     ]
+    // }"#;
 
     write
         .lock()

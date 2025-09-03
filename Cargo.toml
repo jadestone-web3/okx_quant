@@ -5,15 +5,32 @@ edition = "2024"
 
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.21", features = ["native-tls","rustls-tls-native-roots"] }
+
 tungstenite = { version = "0.21", features = ["native-tls","rustls-tls-native-roots"] }
-url = "2"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+# 异步运行时
+tokio = { version = "1.35", features = ["full"] }
+# WebSocket客户端
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+# HTTP客户端
+reqwest = { version = "0.11", features = ["json"] }
+# JSON序列化/反序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 数据库
+rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
+# 时间处理
+chrono = { version = "0.4", features = ["serde"] }
+# 数学计算
+statrs = "0.16"
+# 日志
+log = "0.4"
+env_logger = "0.10"
+# 错误处理
+anyhow = "1.0"
+thiserror = "1.0"
+# URL处理
+url = "2.4"
+# 期货/频道
 futures-util = "0.3"
-anyhow = "1.0.99"
-rusqlite = { version = "0.30", features = ["bundled"] } # SQLite
-lazy_static = "1.4"
-chrono = { version = "0.4", features = ["clock"]}
+# 随机数生成
+rand = "0.8"
