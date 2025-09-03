@@ -253,23 +253,23 @@ impl StrategyManager {
 
         info!("回测数据: {} 根K线", candles.len());
 
-        // 获取策略
-        let strategy = self
-            .strategies
-            .get(symbol)
-            .ok_or_else(|| anyhow::anyhow!("未找到{}的策略", symbol))?;
-
         // 逐根K线进行回测
         for i in 50..candles.len() {
             let current_candles = &candles[0..=i];
             let current_candle = &candles[i];
 
-            // 分析当前数据
-            let signals = strategy.analyze(current_candles)?;
+            // 分析当前数据（在短生命周期内获取策略引用）
+            let signals = {
+                let strategy = self
+                    .strategies
+                    .get(symbol)
+                    .ok_or_else(|| anyhow::anyhow!("未找到{}的策略", symbol))?;
+                strategy.analyze(current_candles)?
+            };
 
-            // 处理生成的信号
+            // 处理生成的信号（此处可对 self 进行可变借用）
             for signal in signals {
-                if let Some(trade) = self.simulate_trade(&signal, current_candle).await? {
+                if let Some(trade) = self.simulate_trade(&signal, current_candles).await? {
                     trades.push(trade);
                 }
             }
@@ -300,7 +300,7 @@ impl StrategyManager {
     async fn simulate_trade(
         &mut self,
         signal: &TradingSignal,
-        candle: &CandleData,
+        current_candles: &[CandleData],
     ) -> Result<Option<Trade>> {
         let symbol = &signal.symbol;
         let current_position = self.positions.get(symbol).cloned();
@@ -309,13 +309,13 @@ impl StrategyManager {
             SignalType::Buy => {
                 if current_position.is_none() || current_position.as_ref().unwrap().quantity <= 0.0
                 {
-                    return self.simulate_long_entry(signal, candle).await;
+                    return self.simulate_long_entry(signal, current_candles).await;
                 }
             }
             SignalType::Sell => {
                 if let Some(position) = current_position {
                     if position.quantity > 0.0 {
-                        return self.simulate_long_exit(signal, candle).await;
+                        return self.simulate_long_exit(signal).await;
                     }
                 }
             }
@@ -329,13 +329,12 @@ impl StrategyManager {
     async fn simulate_long_entry(
         &mut self,
         signal: &TradingSignal,
-        candle: &CandleData,
+        current_candles: &[CandleData],
     ) -> Result<Option<Trade>> {
         let symbol = &signal.symbol;
 
         if let Some(strategy) = self.strategies.get(symbol) {
-            let candles = vec![candle.clone()]; // 简化处理，实际应该传入历史数据
-            let indicators = strategy.calculate_indicators(&candles)?;
+            let indicators = strategy.calculate_indicators(current_candles)?;
 
             if let Some(atr) = indicators.atr {
                 let position_size =
@@ -379,7 +378,6 @@ impl StrategyManager {
     async fn simulate_long_exit(
         &mut self,
         signal: &TradingSignal,
-        candle: &CandleData,
     ) -> Result<Option<Trade>> {
         let symbol = &signal.symbol;
 

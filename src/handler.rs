@@ -155,67 +155,96 @@ async fn collect_historical_data(db: Arc<Database>) -> Result<()> {
 
     info!("开始收集{}的历史K线数据", symbol);
 
-    // 获取最近1000根1分钟K线
-    let url = format!(
-        "https://www.okx.com/api/v5/market/candles?instId={}&bar=1m&limit=1000",
-        symbol
+    // 分页回填：目标回填数量与时间范围可按需调整
+    let target_backfill_count: usize = 5000;
+    let page_limit: usize = 300; // OKX 单页上限通常为 300
+
+    let mut total_collected: usize = 0;
+    let mut before: Option<i64> = None; // 毫秒时间戳，OKX 使用 before 游标
+
+    loop {
+        let page = fetch_candles_page(&client, symbol, page_limit, before).await?;
+        if page.is_empty() {
+            info!("历史回填结束，未返回更多数据，累计{}条", total_collected);
+            break;
+        }
+
+        // OKX 返回通常是按时间倒序（新->旧），为了写库前可直接入库
+        db.save_candles(&page).await?;
+        total_collected += page.len();
+
+        // 更新 before 为本页中最早的一根的时间戳（更旧）
+        let oldest_ts = page.iter().map(|c| c.timestamp.timestamp_millis()).min().unwrap_or(0);
+        before = Some(oldest_ts);
+
+        info!("历史回填进行中：本页{}条，累计{}条", page.len(), total_collected);
+
+        if total_collected >= target_backfill_count {
+            info!("达到目标回填数量{}条，停止回填", target_backfill_count);
+            break;
+        }
+
+        // 简单节流，避免过快请求
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    }
+
+    info!("历史数据回填完成，共{}条记录", total_collected);
+
+    // 改为每分钟增量更新，带冗余覆盖（取最近300条）
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+    loop {
+        interval.tick().await;
+
+        info!("定时更新历史数据（每分钟）");
+        if let Err(e) = update_recent_candles(&db, &client, symbol).await {
+            warn!("定时更新失败: {}", e);
+        }
+    }
+}
+
+/// 拉取一页 OKX 1m K线
+async fn fetch_candles_page(
+    client: &reqwest::Client,
+    symbol: &str,
+    limit: usize,
+    before: Option<i64>,
+) -> Result<Vec<CandleData>> {
+    // OKX 文档：/api/v5/market/candles?instId=...&bar=1m&limit=...&before=...
+    let mut url = format!(
+        "https://www.okx.com/api/v5/market/candles?instId={}&bar=1m&limit={}",
+        symbol, limit
     );
+    if let Some(ts) = before {
+        url.push_str(&format!("&before={}", ts));
+    }
 
     let response = client.get(&url).send().await?;
-
     if !response.status().is_success() {
         return Err(anyhow::anyhow!("API请求失败: {}", response.status()));
     }
 
     let json_response: Value = response.json().await?;
-
     if json_response["code"] != "0" {
         return Err(anyhow::anyhow!("API返回错误: {}", json_response["msg"]));
     }
 
-    let data = json_response["data"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("无效的API响应格式"))?;
-
+    let data = json_response["data"].as_array().ok_or_else(|| anyhow::anyhow!("无效的API响应格式"))?;
     let mut candles = Vec::new();
 
     for candle_data in data {
         if let Some(candle_array) = candle_data.as_array() {
             if candle_array.len() >= 6 {
-                // OKX返回的数据格式: [timestamp, open, high, low, close, volume, ...]
-                let timestamp_ms: i64 =
-                    candle_array[0].as_str().unwrap_or("0").parse().unwrap_or(0);
-
+                let timestamp_ms: i64 = candle_array[0].as_str().unwrap_or("0").parse().unwrap_or(0);
                 let timestamp = DateTime::from_timestamp_millis(timestamp_ms).unwrap_or_default();
 
                 let candle = CandleData {
                     timestamp,
                     symbol: symbol.to_string(),
-                    open: candle_array[1]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    high: candle_array[2]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    low: candle_array[3]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    close: candle_array[4]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    volume: candle_array[5]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
+                    open: candle_array[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    high: candle_array[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    low: candle_array[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    close: candle_array[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    volume: candle_array[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 };
 
                 candles.push(candle);
@@ -223,30 +252,18 @@ async fn collect_historical_data(db: Arc<Database>) -> Result<()> {
         }
     }
 
-    // 批量保存到数据库
-    db.save_candles(&candles).await?;
-    info!("历史数据收集完成，共{}条记录", candles.len());
-
-    // 每小时更新一次历史数据
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(3600));
-    loop {
-        interval.tick().await;
-
-        info!("定时更新历史数据");
-        if let Err(e) = update_recent_candles(&db, &client, symbol).await {
-            warn!("定时更新失败: {}", e);
-        }
-    }
+    Ok(candles)
 }
 
-/// 更新最近的K线数据
+/// 更新最近的K线数据（带冗余覆盖）
 async fn update_recent_candles(
     db: &Database,
     client: &reqwest::Client,
     symbol: &str,
 ) -> Result<()> {
+    // 拉取最近 300 条 1m K 线，依靠 UNIQUE(timestamp, symbol) 实现幂等覆盖
     let url = format!(
-        "https://www.okx.com/api/v5/market/candles?instId={}&bar=1m&limit=100",
+        "https://www.okx.com/api/v5/market/candles?instId={}&bar=1m&limit=300",
         symbol
     );
 
@@ -257,48 +274,24 @@ async fn update_recent_candles(
         return Err(anyhow::anyhow!("API返回错误: {}", json_response["msg"]));
     }
 
-    let data = json_response["data"]
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("无效的API响应格式"))?;
+    let data = json_response["data"].as_array().ok_or_else(|| anyhow::anyhow!("无效的API响应格式"))?;
 
     let mut candles = Vec::new();
 
     for candle_data in data {
         if let Some(candle_array) = candle_data.as_array() {
             if candle_array.len() >= 6 {
-                let timestamp_ms: i64 =
-                    candle_array[0].as_str().unwrap_or("0").parse().unwrap_or(0);
-
+                let timestamp_ms: i64 = candle_array[0].as_str().unwrap_or("0").parse().unwrap_or(0);
                 let timestamp = DateTime::from_timestamp_millis(timestamp_ms).unwrap_or_default();
 
                 let candle = CandleData {
                     timestamp,
                     symbol: symbol.to_string(),
-                    open: candle_array[1]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    high: candle_array[2]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    low: candle_array[3]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    close: candle_array[4]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
-                    volume: candle_array[5]
-                        .as_str()
-                        .unwrap_or("0")
-                        .parse()
-                        .unwrap_or(0.0),
+                    open: candle_array[1].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    high: candle_array[2].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    low: candle_array[3].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    close: candle_array[4].as_str().unwrap_or("0").parse().unwrap_or(0.0),
+                    volume: candle_array[5].as_str().unwrap_or("0").parse().unwrap_or(0.0),
                 };
 
                 candles.push(candle);

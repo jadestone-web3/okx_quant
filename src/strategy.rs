@@ -232,7 +232,7 @@ impl TurtleStrategy {
         };
 
         // 根据成交量放大和价格动量计算置信度
-        let mut confidence = 0.5;
+        let mut confidence: f64 = 0.5;
 
         // 成交量放大增加置信度
         if volume_ratio > 1.5 {
